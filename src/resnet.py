@@ -32,32 +32,68 @@ def download_data_cn(file_name):
         print("Download failed.")
         exit()
 
-class PhysicsInformedNN(nn.Module):
-    def __init__(self, layers):
-        super(PhysicsInformedNN, self).__init__()
+# === 新增：残差块定义 ===
+class ResidualBlock(nn.Module):
+    def __init__(self, hidden_size):
+        super(ResidualBlock, self).__init__()
+        # 残差路径：Linear -> Tanh -> Linear -> Tanh
+        self.layer = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh()
+        )
+        # 权重初始化
+        for m in self.layer:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_normal_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        # 核心：输出 = 变换后的x + 原始x
+        return self.layer(x) + x
+
+# === 修改：ResNet-PINN 主模型 ===
+class ResNetPINN(nn.Module):
+    def __init__(self, input_size=2, hidden_size=20, output_size=1, num_blocks=4):
+        super(ResNetPINN, self).__init__()
         
-        self.depth = len(layers) - 1
+        # 1. 输入映射层
+        self.input_layer = nn.Linear(input_size, hidden_size)
+        
+        # 2. 堆叠残差块 (num_blocks=4 相当于深度增加)
+        self.res_blocks = nn.ModuleList([
+            ResidualBlock(hidden_size) for _ in range(num_blocks)
+        ])
+        
+        # 3. 输出层
+        self.output_layer = nn.Linear(hidden_size, output_size)
+        
         self.activation = nn.Tanh()
         
-        layer_list = []
-        for i in range(self.depth):
-            layer_list.append(nn.Linear(layers[i], layers[i+1]))
-            nn.init.xavier_normal_(layer_list[-1].weight)
-            nn.init.zeros_(layer_list[-1].bias)
+        # 初始化首尾层
+        nn.init.xavier_normal_(self.input_layer.weight)
+        nn.init.xavier_normal_(self.output_layer.weight)
         
-        self.layers_list = nn.ModuleList(layer_list)
-        
+        # === 物理参数 (保持之前的成功设置) ===
+        # lambda_1 初始化为 0.0
         self.lambda_1 = nn.Parameter(torch.tensor([0.0], device=device))
-        
+        # lambda_2 初始化为 -6.0 (exp(-6) approx 0.0025)
         self.lambda_2 = nn.Parameter(torch.tensor([-6.0], device=device))
 
     def forward(self, x, t):
-        a = torch.cat([x, t], dim=1)
-        for i in range(self.depth - 1):
-            a = self.layers_list[i](a)
-            a = self.activation(a)
-        a = self.layers_list[-1](a)
-        return a
+        inputs = torch.cat([x, t], dim=1)
+        
+        # 先做一次线性映射 + 激活
+        out = self.activation(self.input_layer(inputs))
+        
+        # 通过所有残差块
+        for block in self.res_blocks:
+            out = block(out)
+            
+        # 输出
+        out = self.output_layer(out)
+        return out
 
     def physics_loss(self, x, t):
         x.requires_grad = True
@@ -69,13 +105,13 @@ class PhysicsInformedNN(nn.Module):
         u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
         u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
         
+        # 保持 exp 以确保稳定性
         f = u_t + self.lambda_1 * u * u_x - torch.exp(self.lambda_2) * u_xx
-        
         return f
 
 if __name__ == "__main__":
-    if not os.path.exists('./result/baseline'):
-        os.makedirs('./result/baseline')
+    if not os.path.exists('./data'): os.makedirs('./data')
+    if not os.path.exists('./result/resnet'): os.makedirs('./result/resnet')
     
     file_name = "./data/burgers_shock.mat"
     download_data_cn(file_name)
@@ -96,7 +132,7 @@ if __name__ == "__main__":
     t_train_tensor = torch.tensor(X_train[:, 1:2], dtype=torch.float32, device=device)
     u_train_tensor = torch.tensor(u_train, dtype=torch.float32, device=device)
     
-    model = PhysicsInformedNN(layers).to(device)
+    model = ResNetPINN(input_size=2, hidden_size=20, output_size=1, num_blocks=4).to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     
@@ -176,6 +212,7 @@ if __name__ == "__main__":
     print(f"Lambda 1: {pred_l1:.5f} (True: {true_l1}) -> Error: {err_l1:.4f}%")
     print(f"Lambda 2: {pred_l2:.5f} (True: {true_l2:.5f}) -> Error: {err_l2:.4f}%")
     
+
     x_star_tensor = torch.tensor(X_star[:, 0:1], dtype=torch.float32, device=device)
     t_star_tensor = torch.tensor(X_star[:, 1:2], dtype=torch.float32, device=device)
     
@@ -200,7 +237,7 @@ if __name__ == "__main__":
     
     plt.subplot(1, 3, 2)
     plt.pcolormesh(T, X, U_pred, shading='auto', cmap='jet')
-    plt.title(f'Baseline Prediction (Err: {error_u*100:.2f}%)')
+    plt.title(f'ResNet Prediction (Err: {error_u*100:.2f}%)')
     plt.xlabel('t')
     plt.ylabel('x')
     plt.colorbar()
@@ -213,7 +250,7 @@ if __name__ == "__main__":
     plt.colorbar()
     
     plt.tight_layout()
-    save_path_flow = './result/baseline/flow_field.png'
+    save_path_flow = './result/resnet/flow_field_resnet.png'
     plt.savefig(save_path_flow, dpi=150)
 
     true_l1 = 1.0
@@ -243,5 +280,5 @@ if __name__ == "__main__":
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    save_path_param = './result/baseline/parameters.png'
+    save_path_param = './result/resnet/parameters_resnet.png'
     plt.savefig(save_path_param, dpi=150)
