@@ -1,0 +1,3 @@
+Lambda 1: 0.99082 (True: 1.0) -> Error: 0.9178%
+Lambda 2: 0.01038 (True: 0.00318) -> Error: 226.2311%
+Error u (L2 Relative): 21.8947%
